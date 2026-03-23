@@ -117,7 +117,7 @@
         </widget>
        </item>
        <item>
-        <widget class="QLineEdit" name="lineEdit"/>
+        <widget class="QLineEdit" name="searchBar"/>
        </item>
        <item>
         <widget class="QPushButton" name="searchButton">

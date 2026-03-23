@@ -1,222 +1,215 @@
 import sys
 import os
+import numpy as np
+import faiss
 from PySide6 import QtWidgets, QtGui, QtCore
-from PySide6.QtGui import QStandardItemModel, QStandardItem, QIcon, QPixmap
+from PySide6.QtGui import QStandardItemModel, QStandardItem, QIcon
 from PySide6.QtCore import Qt, QSize, QDir, QStandardPaths, QSortFilterProxyModel
 from PySide6.QtUiTools import QUiLoader
 from PySide6.QtWidgets import QFileSystemModel
+
 from database import ManagerBazaDate
-from worker import ProcesorImagine
 from scanner_worker import ScannerWorker
+from worker import ProcesorImagine
+from sentence_transformers import SentenceTransformer
 
-#SE CREEAZA FISIERUL DE BAZE DE DATE
+# 1. INITIALIZARE COORDONATORI
 db_manager = ManagerBazaDate()
-# === IMPORTAM CLASA DIN CELALALT FISIER ===
-from worker import ProcesorImagine 
+# Modelul pentru cautare (il incarcam global pentru a fi gata de search)
+print("Se incarca creierul AI pentru cautare...")
+model_ai = SentenceTransformer('clip-ViT-B-32')
 
-# --- FUNCTIILE DE INTERFATA ---
+# FAISS Index Local pentru cautare instanta
+dimensiune_vector = 512
+index_faiss = faiss.IndexFlatIP(dimensiune_vector)
+mapare_cai = [] # Retinem ordinea: pozitia in FAISS -> calea fisierului
 
-def actualizeaza_panou_dreapta(date, pixmap):
-    """
-    Afiseaza imaginea scalata corect si toate metadatele extrase.
-    Sistem hibrid: daca pixmap e gol, actualizeaza doar textul.
-    """
-    preview_label = window.findChild(QtWidgets.QLabel, "previewLabel")
-    info_label = window.findChild(QtWidgets.QLabel, "infoLabel")
-
-    if not preview_label or not info_label:
+def incarca_index_faiss():
+    """Citeste amprentele AI din baza de date si populeaza motorul de cautare."""
+    global index_faiss, mapare_cai
+    index_faiss.reset()
+    mapare_cai = []
+    
+    date_vectori = db_manager.obtine_toti_vectorii()
+    if not date_vectori:
         return
 
-    # 1. ACTUALIZARE IMAGINE (Doar daca am primit pixeli de la Worker)
-    # Daca pixmap.isNull() este True, inseamna ca datele vin din DB si sarim peste asta,
-    # pastrand ce era inainte pe label (sau ramanand gol pana vine Worker-ul).
-    if pixmap and not pixmap.isNull():
-        pixmap_scalat = pixmap.scaled(
-            preview_label.size(), 
-            QtCore.Qt.KeepAspectRatio, 
-            QtCore.Qt.SmoothTransformation
-        )
-        preview_label.setPixmap(pixmap_scalat)
-        preview_label.setAlignment(QtCore.Qt.AlignCenter)
+    vectori_lista = []
+    for cale, v_numpy in date_vectori:
+        vectori_lista.append(v_numpy)
+        mapare_cai.append(cale)
+    
+    if vectori_lista:
+        v_final = np.array(vectori_lista).astype('float32')
+        index_faiss.add(v_final)
+    print(f"Index FAISS pregatit cu {index_faiss.ntotal} imagini.")
 
-    # 2. CONSTRUIRE TEXT DETALII (Se executa mereu)
+# --- FUNCTII INTERFATA ---
+
+def actualizeaza_panou_dreapta(date, pixmap):
+    preview_label = window.findChild(QtWidgets.QLabel, "previewLabel")
+    info_label = window.findChild(QtWidgets.QLabel, "infoLabel")
+    if not preview_label or not info_label: return
+
+    if pixmap and not pixmap.isNull():
+        pixmap_scalat = pixmap.scaled(preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        preview_label.setPixmap(pixmap_scalat)
+
     detalii = [
         f"<b>Fisier:</b> {date.get('nume', '---')}",
-        f"<b>Format:</b> {date.get('format', '---')}",
-        f"<b>Rezolutie:</b> {date.get('rezolutie', '---')}",
-        f"<b>Marime:</b> {date.get('mb', 0)} MB"
+        f"<b>Marime:</b> {date.get('mb', 0)} MB",
+        f"<b>Rezolutie:</b> {date.get('rezolutie', '---')}"
     ]
-
-    # Adaugam datele EXIF in lista daca exista
-    if date.get('marca'):  detalii.append(f"<b>Marca:</b> {date['marca']}")
-    if date.get('model'):  detalii.append(f"<b>Model:</b> {date['model']}")
-    if date.get('data'):   detalii.append(f"<b>Data:</b> {date['data']}")
-    if date.get('gps'):    detalii.append(f"<b>GPS:</b> {date['gps']}")
-
-    # Adaugam calea la final
-    detalii.append(f"<br><b>Cale completa:</b><br><small>{date.get('cale', '')}</small>")
-
-    # Aplicam textul pe label
+    if date.get('marca'): detalii.append(f"<b>Aparat:</b> {date['marca']} {date.get('model','')}")
+    if date.get('gps'): detalii.append(f"<b>Locatie:</b> {date['gps']}")
+    
     info_label.setText("<br>".join(detalii))
     info_label.setWordWrap(True)
-
-    # 3. SALVARE/ACTUALIZARE IN DB
-    # Salvam doar daca avem un dictionar valid
-    if date:
-        db_manager.salveaza_sau_actualizeaza(date)
 
 procesor_activ = None
 scanner_activ = None
 
 def cand_selectez_o_imagine(index):
     global procesor_activ
-    
     index_sursa = proxy_model.mapToSource(index)
     cale_fisier = index_sursa.data(Qt.ItemDataRole.UserRole)
-    if not cale_fisier: 
-        return
+    if not cale_fisier: return
 
-    # --- 1. SMART LOAD (VERIFICARE DB SI CACHE) ---
-    date_existente = db_manager.cauta_dupa_cale(cale_fisier)
-    
-    if date_existente:
-        # Reconstruim dictionarul
-        date_db = {
-            'cale': date_existente[1],
-            'nume': date_existente[2],
-            'format': date_existente[3],
-            'rezolutie': date_existente[4],
-            'mb': date_existente[5],
-            'marca': date_existente[6],
-            'model': date_existente[7],
-            'data': date_existente[8],
-            'gps': date_existente[9]
+    date_db = db_manager.cauta_dupa_cale(cale_fisier)
+    if date_db:
+        info_d = {
+            'cale': date_db[1], 'nume': date_db[2], 'format': date_db[3],
+            'rezolutie': date_db[4], 'mb': date_db[5], 'marca': date_db[6],
+            'model': date_db[7], 'data': date_db[8], 'gps': date_db[9]
         }
-        
-        # Verificam daca avem imaginea deja reparata in CACHE
-        # In DB, cale_cache este pe coloana 10
-        cale_cache = date_existente[10] if len(date_existente) > 10 else None
-        
-        if cale_cache and os.path.exists(cale_cache):
-            # DACA AVEM CACHE: Afisam TOTUL instant (imagine + text) si oprim functia
-            actualizeaza_panou_dreapta(date_db, QtGui.QPixmap(cale_cache))
-            print(f"Incarcare INSTANT din Cache pentru: {date_db['nume']}")
-            return 
-        else:
-            # DACA NU AVEM CACHE INCA: Punem textul si lasam Worker-ul de jos sa lucreze
-            actualizeaza_panou_dreapta(date_db, QtGui.QPixmap())
-            print(f"Metadate din DB, dar se genereaza imaginea pentru: {date_db['nume']}")
+        if date_db[10] and os.path.exists(date_db[10]):
+            actualizeaza_panou_dreapta(info_d, QtGui.QPixmap(date_db[10]))
+            return
 
-    # --- 2. SIGURANTA THREAD ---
-    if procesor_activ is not None:
-        try:
-            if procesor_activ.isRunning():
-                procesor_activ.terminate()
-                procesor_activ.wait()
-        except RuntimeError:
-            procesor_activ = None
-
-    # --- 3. PORNIRE WORKER (Doar daca nu am avut Cache valid) ---
-    preview_label = window.findChild(QtWidgets.QLabel, "previewLabel")
+    if procesor_activ and procesor_activ.isRunning():
+        procesor_activ.terminate()
     
-    if not date_existente:
-        info_label = window.findChild(QtWidgets.QLabel, "infoLabel")
-        if info_label: 
-            info_label.setText("<i>Se analizeaza imaginea pentru prima oara...</i>")
-
+    preview_label = window.findChild(QtWidgets.QLabel, "previewLabel")
     procesor_activ = ProcesorImagine(cale_fisier, preview_label.size())
     procesor_activ.gata_procesarea.connect(actualizeaza_panou_dreapta)
-    procesor_activ.finished.connect(procesor_activ.deleteLater)
     procesor_activ.start()
 
-def actualizeaza_iconita_live(actual, total):
-    """
-    Se executa in timp ce ScannerWorker lucreaza. 
-    Inlocuieste iconita 'bruta' cu cea rotita corect din cache.
-    """
-    if model_galerie.rowCount() == 0: 
-        return
-    
-    # Indexul in model corespunde cu ordinea fisierelor (actual - 1)
+def actualizeaza_iconita_live(actual):
+    """Update iconita dupa ce AI-ul a terminat de procesat o poza."""
     index_model = model_galerie.index(actual - 1, 0)
-    if not index_model.isValid(): 
-        return
+    if not index_model.isValid(): return
     
     cale_originala = index_model.data(Qt.ItemDataRole.UserRole)
-    if not cale_originala: 
-        return
-    
-    # Intreabam baza de date de noua cale de cache
     date = db_manager.cauta_dupa_cale(cale_originala)
     
     if date and len(date) > 10 and date[10]:
-        cale_cache = date[10]
-        if os.path.exists(cale_cache):
-            # Punem iconita noua, rotita corect
-            icon_nou = QIcon(cale_cache)
-            model_galerie.setData(index_model, icon_nou, Qt.ItemDataRole.DecorationRole)
+        if os.path.exists(date[10]):
+            model_galerie.setData(index_model, QIcon(date[10]), Qt.ItemDataRole.DecorationRole)
 
 def cand_apas_pe_folder(index):
     global scanner_activ
-    
-    # 1. AFLAM CALEA FOLDERULUI
     cale_folder = tree_model.filePath(index)
     if not os.path.isdir(cale_folder): 
         cale_folder = os.path.dirname(cale_folder)
     
     model_galerie.clear()
-    formate = ('.png', '.jpg', '.jpeg', '.bmp', '.gif')
+    formate = ('.png', '.jpg', '.jpeg', '.bmp')
     
-    # 2. AFISARE INITIALA (Sortata si cu Cache verificat)
     try:
-        # Preluam lista de fisiere si o SORTAM alfabetic (extrem de important!)
         nume_fisiere = os.listdir(cale_folder)
         fisiere_valide = sorted([f for f in nume_fisiere if f.lower().endswith(formate)])
         
         for nume in fisiere_valide:
             cale_full = os.path.join(cale_folder, nume)
             item = QStandardItem(nume)
+            date_ex = db_manager.cauta_dupa_cale(cale_full)
             
-            # Verificam in DB daca avem deja cache
-            date_existente = db_manager.cauta_dupa_cale(cale_full)
-            cale_icon = cale_full # Incepem cu originalul
-            
-            if date_existente and len(date_existente) > 10 and date_existente[10]:
-                cale_cache = date_existente[10]
-                # Daca fisierul cache chiar exista fizic, il folosim direct
-                if os.path.exists(cale_cache):
-                    cale_icon = cale_cache 
+            cale_icon = cale_full
+            if date_ex and len(date_ex) > 10 and date_ex[10] and os.path.exists(date_ex[10]):
+                cale_icon = date_ex[10]
 
             item.setData(QIcon(cale_icon), Qt.ItemDataRole.DecorationRole)
             item.setData(cale_full, Qt.ItemDataRole.UserRole)
             model_galerie.appendRow(item)
-            
-    except Exception as e: 
-        print(f"Eroare afisare galerie: {e}")
+    except Exception as e: print(e)
 
-    # 3. GESTIONARE SCANNER
     if scanner_activ and scanner_activ.isRunning():
-        # IMPORTANT: Setam running = False inainte de wait ca sa se opreasca rapid
         scanner_activ.stop()
         scanner_activ.wait()
 
-    # Pornim scanarea noua
     scanner_activ = ScannerWorker(cale_folder)
-    
-    # Conectam update-ul LIVE
-    scanner_activ.progres.connect(actualizeaza_iconita_live)
+    scanner_activ.imagine_reparata.connect(actualizeaza_iconita_live)
+    scanner_activ.finalizat.connect(incarca_index_faiss) # Refresh FAISS la final
     
     if window.statusBar():
-        scanner_activ.progres.connect(
-            lambda cur, tot: window.statusBar().showMessage(f"Indexare folder: {cur}/{tot}")
-        )
-        scanner_activ.finalizat.connect(
-            lambda: window.statusBar().showMessage("Indexare completa.", 3000)
-        )
-        
+        scanner_activ.progres.connect(lambda c, t: window.statusBar().showMessage(f"AI Analiza: {c}/{t}"))
+    
     scanner_activ.start()
 
-def aplic_filtrare_search(text):
+# --- LOGICA DE CAUTARE AI ---
+
+def execut_cautare_ai():
+    """Functia magica: cauta poze semantic si aplica un prag de relevanta."""
+    text = search_bar.text().strip()
+    
+    # 1. Resetare: Daca bara e goala, aratam tot
+    if not text:
+        proxy_model.setFilterFixedString("")
+        print("[AI Search] Resetare filtru.")
+        return
+
+    print(f"\n[AI Search] Analizam textul: '{text}'...")
+
+    # 2. Transformam textul in vector (Embedding)
+    vector_text = model_ai.encode([text], normalize_embeddings=True).astype('float32')
+
+    # 3. Cautam in FAISS
+    # Cerem top 5 rezultate (cele mai relevante)
+    k_cerut = min(5, index_faiss.ntotal)
+    if k_cerut == 0: 
+        print("[AI Search] Indexul FAISS este gol. Scaneaza un folder mai intai!")
+        return
+    
+    distante, indexuri = index_faiss.search(vector_text, k_cerut)
+    
+    # 4. Filtrare dupa SCOR (Threshold)
+    # CLIP scoate scoruri de similitudine. 0.20 - 0.24 e un prag bun.
+    prag_relevanta = 0.21 
+    nume_gasite = []
+    
+    print(f"[AI Search] Rezultate gasite (Prag > {prag_relevanta}):")
+    
+    for i, idx in enumerate(indexuri[0]):
+        if idx != -1:
+            scor = distante[0][i] # Scorul de potrivire
+            if scor > prag_relevanta:
+                cale_completa = mapare_cai[idx]
+                nume_fisier = os.path.basename(cale_completa)
+                
+                # Pregatim numele pentru Regex (escaped pentru caractere speciale)
+                nume_gasite.append(QtCore.QRegularExpression.escape(nume_fisier))
+                print(f"   - {nume_fisier} | Scor: {scor:.4f} [ADMIS]")
+            else:
+                # Optional: printam si ce am respins pentru debug
+                cale_reapinsa = os.path.basename(mapare_cai[idx])
+                print(f"   - {cale_reapinsa} | Scor: {scor:.4f} [RESPINS - prea mic]")
+
+    # 5. Aplicam FILTRUL vizual
+    if nume_gasite:
+        # Regex-ul va forta modelul sa arate DOAR aceste fisiere
+        pattern = "^(" + "|".join(nume_gasite) + ")$"
+        regex = QtCore.QRegularExpression(pattern, QtCore.QRegularExpression.CaseInsensitiveOption)
+        
+        proxy_model.setFilterRegularExpression(regex)
+        proxy_model.setFilterKeyColumn(0) # Coloana 'Name'
+        print(f"[AI Search] Galeria a fost filtrata. ({len(nume_gasite)} rezultate)")
+    else:
+        # Daca nimic nu a trecut pragul, golim galeria ca sa nu inducem in eroare utilizatorul
+        proxy_model.setFilterFixedString("___NIMIC_GASIT_SAU_RELEVANT___")
+        print("[AI Search] Niciun rezultat nu a fost suficient de relevant.")
+
+def aplic_filtrare_simpla(text):
+    """Filtrare instanta dupa nume (cand scrii)."""
     proxy_model.setFilterFixedString(text)
     proxy_model.setFilterCaseSensitivity(Qt.CaseInsensitive)
 
@@ -225,14 +218,26 @@ app = QtWidgets.QApplication(sys.argv)
 loader = QUiLoader()
 window = loader.load("interfata.ui", None)
 
+# Incarcam datele AI existente in FAISS la pornire
+incarca_index_faiss()
+
 view_galerie = window.findChild(QtWidgets.QListView, "photoView")
 model_galerie = QStandardItemModel()
 proxy_model = QSortFilterProxyModel()
 proxy_model.setSourceModel(model_galerie)
+
 view_galerie.setModel(proxy_model)
 view_galerie.setViewMode(QtWidgets.QListView.ViewMode.IconMode)
-view_galerie.setIconSize(QSize(120, 120))
-view_galerie.setGridSize(QSize(140, 140))
+# --- LINIILE DE REPARARE ---
+# Aceasta linie face pozele sa se rearanjeze automat la resize/fullscreen:
+view_galerie.setResizeMode(QtWidgets.QListView.ResizeMode.Adjust)
+
+# Previne suprapunerea pozelor si le tine intr-o grila ordonata:
+view_galerie.setMovement(QtWidgets.QListView.Movement.Static)
+view_galerie.setSpacing(10) # Adauga putin spatiu intre poze sa nu fie lipite
+# ---------------------------
+view_galerie.setIconSize(QSize(130, 130))
+view_galerie.setGridSize(QSize(160, 180))
 view_galerie.clicked.connect(cand_selectez_o_imagine)
 
 tree_view = window.findChild(QtWidgets.QTreeView, "treeViewFolders")
@@ -248,7 +253,11 @@ for i in range(1, 4): tree_view.hideColumn(i)
 tree_view.clicked.connect(cand_apas_pe_folder)
 
 search_bar = window.findChild(QtWidgets.QLineEdit, "searchBar")
-if search_bar: search_bar.textChanged.connect(aplic_filtrare_search)
+if search_bar:
+    # Cand doar scrii, cauta dupa nume (rapid)
+    search_bar.textChanged.connect(aplic_filtrare_simpla)
+    # Cand apesi ENTER, porneste AI-ul (semantic)
+    search_bar.returnPressed.connect(execut_cautare_ai)
 
 window.show()
 sys.exit(app.exec())
