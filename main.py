@@ -149,22 +149,26 @@ def cand_apas_pe_folder(index):
 # --- LOGICA DE CAUTARE AI ---
 
 def execut_cautare_ai():
-    """Functia magica: cauta poze semantic si aplica un prag de relevanta."""
-    text = search_bar.text().strip()
+    """Functia magica: cauta poze semantic folosind un prompt optimizat."""
+    text_original = search_bar.text().strip()
     
     # 1. Resetare: Daca bara e goala, aratam tot
-    if not text:
+    if not text_original:
         proxy_model.setFilterFixedString("")
         print("[AI Search] Resetare filtru.")
         return
 
-    print(f"\n[AI Search] Analizam textul: '{text}'...")
+    # --- OPTIMIZARE PROMPT ---
+    # CLIP a fost antrenat pe descrieri, nu pe cuvinte cheie. 
+    # Adaugarea "a photo of" ajuta modelul sa identifice mult mai bine subiectul.
+    text_optimizat = f"a photo of {text_original}"
+    print(f"\n[AI Search] Cautare originala: '{text_original}'")
+    print(f"[AI Search] Prompt optimizat pentru AI: '{text_optimizat}'")
 
-    # 2. Transformam textul in vector (Embedding)
-    vector_text = model_ai.encode([text], normalize_embeddings=True).astype('float32')
+    # 2. Transformam textul optimizat in vector (Embedding)
+    vector_text = model_ai.encode([text_optimizat], normalize_embeddings=True).astype('float32')
 
     # 3. Cautam in FAISS
-    # Cerem top 5 rezultate (cele mai relevante)
     k_cerut = min(5, index_faiss.ntotal)
     if k_cerut == 0: 
         print("[AI Search] Indexul FAISS este gol. Scaneaza un folder mai intai!")
@@ -172,41 +176,37 @@ def execut_cautare_ai():
     
     distante, indexuri = index_faiss.search(vector_text, k_cerut)
     
-    # 4. Filtrare dupa SCOR (Threshold)
-    # CLIP scoate scoruri de similitudine. 0.20 - 0.24 e un prag bun.
-    prag_relevanta = 0.21 
+    # 4. Filtrare dupa SCOR
+    # Cu "a photo of", scorurile cresc, deci 0.21 e un prag foarte sigur (safe).
+    prag_relevanta = 0.22 
     nume_gasite = []
     
     print(f"[AI Search] Rezultate gasite (Prag > {prag_relevanta}):")
     
     for i, idx in enumerate(indexuri[0]):
         if idx != -1:
-            scor = distante[0][i] # Scorul de potrivire
+            scor = distante[0][i]
             if scor > prag_relevanta:
                 cale_completa = mapare_cai[idx]
                 nume_fisier = os.path.basename(cale_completa)
                 
-                # Pregatim numele pentru Regex (escaped pentru caractere speciale)
                 nume_gasite.append(QtCore.QRegularExpression.escape(nume_fisier))
                 print(f"   - {nume_fisier} | Scor: {scor:.4f} [ADMIS]")
             else:
-                # Optional: printam si ce am respins pentru debug
                 cale_reapinsa = os.path.basename(mapare_cai[idx])
-                print(f"   - {cale_reapinsa} | Scor: {scor:.4f} [RESPINS - prea mic]")
+                print(f"   - {cale_reapinsa} | Scor: {scor:.4f} [RESPINS - sub prag]")
 
     # 5. Aplicam FILTRUL vizual
     if nume_gasite:
-        # Regex-ul va forta modelul sa arate DOAR aceste fisiere
         pattern = "^(" + "|".join(nume_gasite) + ")$"
         regex = QtCore.QRegularExpression(pattern, QtCore.QRegularExpression.CaseInsensitiveOption)
         
         proxy_model.setFilterRegularExpression(regex)
-        proxy_model.setFilterKeyColumn(0) # Coloana 'Name'
+        proxy_model.setFilterKeyColumn(0) 
         print(f"[AI Search] Galeria a fost filtrata. ({len(nume_gasite)} rezultate)")
     else:
-        # Daca nimic nu a trecut pragul, golim galeria ca sa nu inducem in eroare utilizatorul
-        proxy_model.setFilterFixedString("___NIMIC_GASIT_SAU_RELEVANT___")
-        print("[AI Search] Niciun rezultat nu a fost suficient de relevant.")
+        proxy_model.setFilterFixedString("___NIMIC_GASIT___")
+        print("[AI Search] Niciun rezultat nu a trecut pragul de relevanta.")
 
 def aplic_filtrare_simpla(text):
     """Filtrare instanta dupa nume (cand scrii)."""
