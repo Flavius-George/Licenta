@@ -93,6 +93,8 @@ def actualizeaza_smart_albums():
 
 
 def cand_apas_pe_smart_album(item):
+    global vizualizare_activa
+    vizualizare_activa="smart"
     """Afiseaza in galerie toate pozele din categoria selectata, din orice folder."""
     text_complet = item.text() 
     categorie = text_complet.split(" (")[0] # Luam "Documente" din "Documente (1)"
@@ -157,6 +159,7 @@ def actualizeaza_panou_dreapta(date, pixmap):
 procesor_activ = None
 scanner_activ = None
 index_folder_curent = None
+vizualizare_activa = "folder"
 
 def cand_selectez_o_imagine(index):
     global procesor_activ
@@ -201,7 +204,8 @@ def updateaza_status_progres(curent, total):
         window.statusBar().showMessage(f"AI Analiza: {curent}/{total}")
 
 def cand_apas_pe_folder(index):
-    global scanner_activ, index_folder_curent
+    global scanner_activ, index_folder_curent, vizualizare_activa
+    vizualizare_activa = "folder"
     index_folder_curent = index
     cale_folder = tree_model.filePath(index)
     
@@ -429,9 +433,9 @@ tree_view.clicked.connect(cand_apas_pe_folder)
 #-----------------------------------------------------------------------------------
 def refresh_galerie_la_bifa():
     """Cauta din nou pozele daca am schimbat setarea de recursivitate."""
-    global index_folder_curent
+    global index_folder_curent, vizualizare_activa
     # Daca am apasat deja pe un folder inainte, re-apelam functia cu acelasi index
-    if index_folder_curent:
+    if vizualizare_activa == "folder" and index_folder_curent:
         cand_apas_pe_folder(index_folder_curent)
 
 # Gasim checkbox-ul si il conectam
