@@ -111,6 +111,8 @@ def cand_apas_pe_smart_album(item):
     if not cai_fisiere:
         print(f"Nu am gasit poze pentru categoria: {categorie}")
         return
+    
+    cai_fisiere = list(dict.fromkeys([os.path.normpath(c) for c in cai_fisiere]))
 
     # 4. Adaugam fiecare poza gasita in galerie (exact ca la click pe folder)
     for cale_full in cai_fisiere:
