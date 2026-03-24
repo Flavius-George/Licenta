@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>1091</width>
-    <height>734</height>
+    <width>1022</width>
+    <height>732</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -72,9 +72,9 @@
          </property>
          <widget class="QTreeView" name="treeViewFolders"/>
          <widget class="QListWidget" name="smartAlbumWidget"/>
-         <widget class="QPushButton" name="pushButton">
+         <widget class="QPushButton" name="bttnAddSmartAlbum">
           <property name="text">
-           <string>PushButton</string>
+           <string>Colectie noua</string>
           </property>
          </widget>
         </widget>
@@ -196,7 +196,7 @@
     <rect>
      <x>0</x>
      <y>0</y>
-     <width>1091</width>
+     <width>1022</width>
      <height>33</height>
     </rect>
    </property>
