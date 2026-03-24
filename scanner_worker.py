@@ -5,7 +5,7 @@ from PIL import Image, ImageOps
 from PIL.ExifTags import TAGS, GPSTAGS
 from sentence_transformers import SentenceTransformer
 
-# Functie pentru coordonate GPS (fara diacritice)
+# Functie pentru coordonate GPS 
 def converteste_gps(valoare):
     try:
         grade = float(valoare[0])
@@ -16,17 +16,27 @@ def converteste_gps(valoare):
         return str(valoare)
 
 class ScannerWorker(QThread):
-    progres = Signal(int, int)      # Pentru Status Bar (numara tot)
-    imagine_reparata = Signal(int)  # Se emite cand procesam o imagine noua (cache + AI)
+    progres = Signal(int, int)      
+    imagine_reparata = Signal(int)  
     finalizat = Signal()
 
     def __init__(self, cale_folder):
         super().__init__()
         self.cale_folder = cale_folder
         self.running = True
-        # Incarcam modelul o singura data la initializare
-        # ViT-B-32 este echilibrul perfect intre viteza si acuratete
         self.model = None 
+        
+        # --- DEFINIRE CATEGORII SMART ---
+        self.categorii_config = {
+            "Oameni": "a photo of a person, a portrait, or a group of people",
+            "Natura": "a natural landscape, mountains, forest, trees, or a beach",
+            "Tehnologie": "electronic devices, computer hardware, gadgets, or circuit boards",
+            "Documente": "a screenshot, a document with text, a scan of a paper, or a book",
+            "Arhitectura": "buildings, city streets, houses, or architecture",
+            "Vehicule": "cars, motorcycles, airplanes, or transport vehicles",
+            "Animale": "a photo of a pet, a dog, a cat, or a wild animal",
+            "Mancare": "delicious food, a meal, drinks, or a restaurant setting"
+        }
 
     def stop(self):
         self.running = False
@@ -36,13 +46,18 @@ class ScannerWorker(QThread):
         db = ManagerBazaDate()
         
         # 1. PREGATIRE MODEL AI
-        # Incarcam modelul in interiorul thread-ului pentru a nu bloca interfata
         if self.model is None:
+            # Folosim B-32 pentru viteza pe 8GB RAM
             self.model = SentenceTransformer('clip-ViT-B-32')
+
+        # --- PRE-CALCULARE VECTORI CATEGORII ---
+        # Facem asta o singura data la inceputul scanarii pentru a economisi timp
+        nume_categorii = list(self.categorii_config.keys())
+        prompte_categorii = list(self.categorii_config.values())
+        vectori_categorii = self.model.encode(prompte_categorii, normalize_embeddings=True)
 
         formate = ('.png', '.jpg', '.jpeg', '.bmp')
         try:
-            # SORTARE ALFABETICA pentru sincronizare cu UI
             nume_fisiere = os.listdir(self.cale_folder)
             fisiere = sorted([f for f in nume_fisiere if f.lower().endswith(formate)])
         except:
@@ -59,32 +74,38 @@ class ScannerWorker(QThread):
             
             current = i + 1
             cale_full = os.path.join(self.cale_folder, nume)
-            
-            # Verificam ce avem deja in DB
             existenta = db.cauta_dupa_cale(cale_full)
 
-            # LOGICA DE SKIP INTELIGENT:
-            # existenta[10] = cale_cache, existenta[11] = vector_ai
-            are_cache = existenta and len(existenta) > 10 and existenta[10] and os.path.exists(existenta[10])
-            are_vector = existenta and len(existenta) > 11 and existenta[11] is not None
+            # Verificam daca are deja si categoria (existenta[5] conform structurii noi)
+            are_cache = existenta and len(existenta) > 6 and existenta[6] and os.path.exists(existenta[6])
+            are_vector = existenta and len(existenta) > 4 and existenta[4] is not None
+            are_categorie = existenta and len(existenta) > 5 and existenta[5] is not None
 
-            if are_cache and are_vector:
+            if are_cache and are_vector and are_categorie:
                 self.progres.emit(current, total)
                 continue
 
             try:
                 with Image.open(cale_full) as img:
-                    # 1. CORECTIE ORIENTARE
                     img_fix = ImageOps.exif_transpose(img)
                     
                     # 2. GENERARE VECTOR AI (CLIP)
-                    # Folosim imaginea "dreapta" pentru ca AI-ul sa vada corect
                     vector_ai = self.model.encode(img_fix, normalize_embeddings=True)
                     
-                    # 3. GENERARE CACHE (Thumbnail)
+                    # --- LOGICA DE AUTO-ORGANIZARE (Zero-Shot) ---
+                    # Comparam vectorul pozei cu toate categoriile prin produs scalar (dot product)
+                    scoruri = np.dot(vectori_categorii, vector_ai)
+                    idx_castigator = np.argmax(scoruri)
+                    
+                    # Prag de siguranta: daca niciun scor nu e > 0.18, o punem la "Diverse"
+                    if scoruri[idx_castigator] > 0.18:
+                        categorie_finala = nume_categorii[idx_castigator]
+                    else:
+                        categorie_finala = "Diverse"
+
+                    # 3. GENERARE CACHE
                     nume_cache = f"cache_{nume}.png"
                     cale_cache = os.path.join(folder_cache, nume_cache)
-                    
                     img_thumb = img_fix.copy()
                     img_thumb.thumbnail((1024, 1024)) 
                     img_thumb.save(cale_cache, "PNG")
@@ -97,7 +118,8 @@ class ScannerWorker(QThread):
                         'rezolutie': f"{img_fix.width}x{img_fix.height}",
                         'mb': round(os.path.getsize(cale_full) / (1024*1024), 2),
                         'cale_cache': cale_cache,
-                        'vector_ai': vector_ai # Adaugam vectorul pentru DB
+                        'vector_ai': vector_ai,
+                        'categorie': categorie_finala # <--- NOUA COLOANA
                     }
                     
                     # 5. EXIF
@@ -120,12 +142,10 @@ class ScannerWorker(QThread):
 
                     # 6. SALVARE IN DB
                     db.salveaza_sau_actualizeaza(date_info)
-                    
-                    # Anuntam UI-ul ca avem o imagine "gata" (corectata + AI)
                     self.imagine_reparata.emit(current)
                     
             except Exception as e:
-                print(f"Eroare procesare AI/Cache pentru {nume}: {e}")
+                print(f"Eroare procesare AI pentru {nume}: {e}")
 
             self.progres.emit(current, total)
 

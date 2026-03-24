@@ -12,7 +12,7 @@ class ManagerBazaDate:
         return sqlite3.connect(self.nume_db)
 
     def creeaza_tabel(self):
-        """Creeaza tabelul principal cu suport pentru vectori AI."""
+        """Creeaza tabelul principal cu suport pentru vectori AI si Categorii Smart."""
         conn = self._conectare()
         cursor = conn.cursor()
         cursor.execute('''
@@ -28,28 +28,27 @@ class ManagerBazaDate:
                 data_poza TEXT,
                 gps TEXT,
                 cale_cache TEXT,
-                vector_ai BLOB  -- Aici salvam amprenta AI (vectorul de 512 numere)
+                categorie TEXT,  -- NOU: Aici salvam categoria (Oameni, Natura, etc.)
+                vector_ai BLOB   -- Amprenta AI
             )
         ''')
         conn.commit()
         conn.close()
 
     def salveaza_sau_actualizeaza(self, d):
-        """Salveaza datele imaginii, inclusiv vectorul AI."""
+        """Salveaza datele imaginii, inclusiv vectorul AI si Categoria."""
         conn = self._conectare()
         cursor = conn.cursor()
         
-        # Pregatim vectorul AI: daca exista, il transformam in bytes folosind pickle
         vector_binar = None
         if d.get('vector_ai') is not None:
-            # d['vector_ai'] este un array numpy; il transformam in format binar
             vector_binar = pickle.dumps(d.get('vector_ai'))
 
         try:
             cursor.execute('''
                 INSERT OR REPLACE INTO imagini 
-                (cale, nume, format, rezolutie, mb, marca, model, data_poza, gps, cale_cache, vector_ai)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (cale, nume, format, rezolutie, mb, marca, model, data_poza, gps, cale_cache, categorie, vector_ai)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 d.get('cale'), 
                 d.get('nume'), 
@@ -61,7 +60,8 @@ class ManagerBazaDate:
                 d.get('data'), 
                 d.get('gps'),
                 d.get('cale_cache'),
-                vector_binar  # Salvat ca BLOB
+                d.get('categorie'), # Salvam categoria decisa de ScannerWorker
+                vector_binar
             ))
             conn.commit()
         except Exception as e:
@@ -76,16 +76,10 @@ class ManagerBazaDate:
         cursor.execute("SELECT * FROM imagini WHERE cale = ?", (cale_fisier,))
         date = cursor.fetchone()
         conn.close()
-        
-        # Daca avem date si vectorul AI este prezent, ar fi util sa il despachetam,
-        # dar de obicei il folosim doar la cautarea globala.
         return date
 
     def obtine_toti_vectorii(self):
-        """
-        Incarca toti vectorii salvati pentru a popula indexul FAISS la pornire.
-        Returneaza o lista de (cale, vector_numpy).
-        """
+        """Incarca toti vectorii pentru FAISS."""
         conn = self._conectare()
         cursor = conn.cursor()
         cursor.execute("SELECT cale, vector_ai FROM imagini WHERE vector_ai IS NOT NULL")
@@ -100,3 +94,12 @@ class ManagerBazaDate:
             except:
                 continue
         return date_ai
+
+    def obtine_imagini_dupa_categorie(self, nume_categorie):
+        """Returneaza lista de fisiere dintr-o anumita categorie AI."""
+        conn = self._conectare()
+        cursor = conn.cursor()
+        cursor.execute("SELECT nume FROM imagini WHERE categorie = ?", (nume_categorie,))
+        rezultate = [r[0] for r in cursor.fetchall()]
+        conn.close()
+        return rezultate
