@@ -5,7 +5,7 @@ from PIL import Image, ImageOps
 from PIL.ExifTags import TAGS, GPSTAGS
 from sentence_transformers import SentenceTransformer
 
-# Functie pentru coordonate GPS 
+# Funcție pentru conversia coordonatelor GPS
 def converteste_gps(valoare):
     try:
         grade = float(valoare[0])
@@ -26,16 +26,62 @@ class ScannerWorker(QThread):
         self.running = True
         self.model = None 
         
-        # --- DEFINIRE CATEGORII SMART ---
+        # --- CONFIGURAȚIE PROMPTE (Prompt Ensembling în Engleză) ---
         self.categorii_config = {
-            "Oameni": "a photo of a person, a portrait, or a group of people",
-            "Natura": "a natural landscape, mountains, forest, trees, or a beach",
-            "Tehnologie": "electronic devices, computer hardware, gadgets, or circuit boards",
-            "Documente": "a screenshot, a document with text, a scan of a paper, or a book",
-            "Arhitectura": "buildings, city streets, houses, or architecture",
-            "Vehicule": "cars, motorcycles, airplanes, or transport vehicles",
-            "Animale": "a photo of a pet, a dog, a cat, or a wild animal",
-            "Mancare": "delicious food, a meal, drinks, or a restaurant setting"
+            "Oameni": [
+                "a photo of a person", 
+                "a portrait of a man or a woman", 
+                "a group of people standing together",
+                "human faces and people"
+            ],
+            "Natura": [
+                "a natural landscape with no buildings", 
+                "mountains, forests, trees or lakes", 
+                "a beautiful view of nature",
+                "outdoor scenery with plants and sky"
+            ],
+            "Tehnologie": [
+                "computer hardware and electronic components", 
+                "printed circuit boards and microchips", 
+                "electronic gadgets and smartphones",
+                "modern technology and devices"
+            ],
+            "Documente": [
+                "a screenshot of digital text", 
+                "a scanned paper or a document", 
+                "black text on a white background",
+                "a page from a book or an article"
+            ],
+            "Arhitectura": [
+                "city buildings and architecture", 
+                "houses and residential buildings", 
+                "urban street view and skyscrapers",
+                "interior or exterior of a building"
+            ],
+            "Vehicule": [
+                "cars, trucks or motorcycles on the road", 
+                "airplanes, trains or boats", 
+                "transportation vehicles",
+                "a photo of a vehicle"
+            ],
+            "Animale": [
+                "a photo of a pet like a dog or a cat", 
+                "wildlife animals in their habitat", 
+                "birds, insects or mammals",
+                "a close up of an animal"
+            ],
+            "Mancare": [
+                "a close-up of food on a plate", 
+                "a delicious meal or snacks", 
+                "culinary photography and cooking",
+                "food ingredients and gourmet dishes"
+            ],
+            "Evenimente": [
+                "people celebrating a party or a wedding", 
+                "a decorated Christmas tree with lights", 
+                "a social gathering or a holiday event",
+                "a festive ceremony or a public event"
+            ]
         }
 
     def stop(self):
@@ -45,41 +91,59 @@ class ScannerWorker(QThread):
         from database import ManagerBazaDate
         db = ManagerBazaDate()
         
-        # 1. PREGATIRE MODEL AI
+        # 1. PREGĂTIRE MODEL AI
         if self.model is None:
-            # Folosim B-32 pentru viteza pe 8GB RAM
             self.model = SentenceTransformer('clip-ViT-B-32')
 
-        # --- PRE-CALCULARE VECTORI CATEGORII ---
-        # Facem asta o singura data la inceputul scanarii pentru a economisi timp
+        # --- PRE-CALCULARE VECTORI MEDII (Prompt Ensembling) ---
         nume_categorii = list(self.categorii_config.keys())
-        prompte_categorii = list(self.categorii_config.values())
-        vectori_categorii = self.model.encode(prompte_categorii, normalize_embeddings=True)
+        vectori_reprezentativi = []
 
+        for nume in nume_categorii:
+            prompte_lista = self.categorii_config[nume]
+            # Generăm vectori pentru toate descrierile din listă
+            v_prompte = self.model.encode(prompte_lista, normalize_embeddings=True)
+            # Calculăm media lor pentru un "concept" mai stabil
+            v_mediu = np.mean(v_prompte, axis=0)
+            # Re-normalizăm vectorul mediu (obligatoriu pentru CLIP)
+            v_mediu = v_mediu / np.linalg.norm(v_mediu)
+            vectori_reprezentativi.append(v_mediu)
+
+        vectori_categorii = np.array(vectori_reprezentativi)
+
+        # 2. SCANARE RECURSIVĂ
         formate = ('.png', '.jpg', '.jpeg', '.bmp')
+        fisiere_totale = []
+        
         try:
-            nume_fisiere = os.listdir(self.cale_folder)
-            fisiere = sorted([f for f in nume_fisiere if f.lower().endswith(formate)])
-        except:
+            for radacina, directoare, fisiere_nume in os.walk(self.cale_folder):
+                for nume in fisiere_nume:
+                    if nume.lower().endswith(formate):
+                        cale_completa = os.path.join(radacina, nume)
+                        fisiere_totale.append(cale_completa)
+            
+            fisiere_totale.sort()
+        except Exception as e:
+            print(f"Eroare la scanarea folderelor: {e}")
             return
 
-        total = len(fisiere)
+        total = len(fisiere_totale)
         folder_cache = os.path.join(os.getcwd(), ".cache")
         if not os.path.exists(folder_cache):
             os.makedirs(folder_cache)
 
-        for i, nume in enumerate(fisiere):
+        # 3. PROCESARE FIȘIERE
+        for i, cale_full in enumerate(fisiere_totale):
             if not self.running:
                 break
             
             current = i + 1
-            cale_full = os.path.join(self.cale_folder, nume)
+            nume_fisier = os.path.basename(cale_full)
             existenta = db.cauta_dupa_cale(cale_full)
 
-            # Verificam daca are deja si categoria (existenta[5] conform structurii noi)
-            are_cache = existenta and len(existenta) > 6 and existenta[6] and os.path.exists(existenta[6])
-            are_vector = existenta and len(existenta) > 4 and existenta[4] is not None
-            are_categorie = existenta and len(existenta) > 5 and existenta[5] is not None
+            are_cache = existenta and len(existenta) > 10 and existenta[10] and os.path.exists(existenta[10])
+            are_vector = existenta and len(existenta) > 12 and existenta[12] is not None
+            are_categorie = existenta and len(existenta) > 11 and existenta[11] is not None
 
             if are_cache and are_vector and are_categorie:
                 self.progres.emit(current, total)
@@ -89,40 +153,36 @@ class ScannerWorker(QThread):
                 with Image.open(cale_full) as img:
                     img_fix = ImageOps.exif_transpose(img)
                     
-                    # 2. GENERARE VECTOR AI (CLIP)
+                    # Generare vector pentru imagine
                     vector_ai = self.model.encode(img_fix, normalize_embeddings=True)
                     
-                    # --- LOGICA DE AUTO-ORGANIZARE (Zero-Shot) ---
-                    # Comparam vectorul pozei cu toate categoriile prin produs scalar (dot product)
+                    # Clasificare (Produs Scalar cu vectorii medii)
                     scoruri = np.dot(vectori_categorii, vector_ai)
                     idx_castigator = np.argmax(scoruri)
                     
-                    # Prag de siguranta: daca niciun scor nu e > 0.18, o punem la "Diverse"
                     if scoruri[idx_castigator] > 0.18:
                         categorie_finala = nume_categorii[idx_castigator]
                     else:
                         categorie_finala = "Diverse"
 
-                    # 3. GENERARE CACHE
-                    nume_cache = f"cache_{nume}.png"
+                    # Thumbnail
+                    nume_cache = f"cache_{current}_{nume_fisier}.png"
                     cale_cache = os.path.join(folder_cache, nume_cache)
                     img_thumb = img_fix.copy()
                     img_thumb.thumbnail((1024, 1024)) 
                     img_thumb.save(cale_cache, "PNG")
 
-                    # 4. COLECTARE DATE
                     date_info = {
                         'cale': cale_full,
-                        'nume': nume,
+                        'nume': nume_fisier,
                         'format': img.format,
                         'rezolutie': f"{img_fix.width}x{img_fix.height}",
                         'mb': round(os.path.getsize(cale_full) / (1024*1024), 2),
                         'cale_cache': cale_cache,
                         'vector_ai': vector_ai,
-                        'categorie': categorie_finala # <--- NOUA COLOANA
+                        'categorie': categorie_finala
                     }
                     
-                    # 5. EXIF
                     exif_raw = img._getexif()
                     if exif_raw:
                         for id_tag, valoare in exif_raw.items():
@@ -140,12 +200,11 @@ class ScannerWorker(QThread):
                                     lon = converteste_gps(info_g["GPSLongitude"])
                                     date_info['gps'] = f"Lat: {lat} | Lon: {lon}"
 
-                    # 6. SALVARE IN DB
                     db.salveaza_sau_actualizeaza(date_info)
                     self.imagine_reparata.emit(current)
                     
             except Exception as e:
-                print(f"Eroare procesare AI pentru {nume}: {e}")
+                print(f"Eroare procesare AI pentru {cale_full}: {e}")
 
             self.progres.emit(current, total)
 

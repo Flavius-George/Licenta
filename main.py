@@ -44,6 +44,94 @@ def incarca_index_faiss():
         index_faiss.add(v_final)
     print(f"Index FAISS pregatit cu {index_faiss.ntotal} imagini.")
 
+def actualizeaza_smart_albums():
+    """Citeste din DB cate poze sunt in fiecare categorie si updateaza lista din stanga."""
+    # Gasim widget-ul de tip lista din interfata
+    smart_list = window.findChild(QtWidgets.QListWidget, "smartAlbumWidget")
+    if not smart_list: 
+        return
+
+    # Lista de categorii trebuie sa fie identica cu cheile din ScannerWorker
+    categorii = [
+        "Oameni", 
+        "Natura", 
+        "Tehnologie", 
+        "Documente", 
+        "Arhitectura", 
+        "Vehicule", 
+        "Animale", 
+        "Mancare", 
+        "Evenimente", 
+        "Diverse"
+    ]
+    
+    # Stergem ce era inainte in lista vizuala ca sa nu se dubleze la fiecare refresh
+    smart_list.clear() 
+
+    for cat in categorii:
+        # Apelam functia din database.py care face SELECT COUNT(*)
+        total = db_manager.numara_per_categorie(cat)
+        
+        # Cream textul de afisat: "Natura (12)"
+        item_text = f"{cat} ({total})"
+        
+        # Cream un element nou pentru lista
+        item = QtWidgets.QListWidgetItem(item_text)
+        
+        # Optional: Poti seta un font bold daca total > 0 ca sa iasa in evidenta
+        if total > 0:
+            font = item.font()
+            font.setBold(True)
+            item.setFont(font)
+            # Poti pune si o iconita standard de sistem daca vrei
+            # item.setIcon(window.style().standardIcon(QtWidgets.QStyle.SP_DirIcon))
+
+        # Adaugam elementul efectiv in widget-ul de pe interfata
+        smart_list.addItem(item)
+        
+    print(f"[UI] Numaratoare categorii actualizata. S-au procesat {len(categorii)} etichete.")
+
+
+def cand_apas_pe_smart_album(item):
+    """Afiseaza in galerie toate pozele din categoria selectata, din orice folder."""
+    text_complet = item.text() 
+    categorie = text_complet.split(" (")[0] # Luam "Documente" din "Documente (1)"
+    
+    # 1. Resetam filtrul de cautare ca sa nu ascunda noile poze
+    proxy_model.setFilterFixedString("")
+    
+    # 2. Curatam galeria curenta
+    model_galerie.clear()
+    
+    # 3. Luam de la baza de date TOATE caile care apartin acestei categorii
+    cai_fisiere = db_manager.obtine_cai_dupa_categorie(categorie)
+    
+    if not cai_fisiere:
+        print(f"Nu am gasit poze pentru categoria: {categorie}")
+        return
+
+    # 4. Adaugam fiecare poza gasita in galerie (exact ca la click pe folder)
+    for cale_full in cai_fisiere:
+        if not os.path.exists(cale_full):
+            continue
+            
+        nume_fisier = os.path.basename(cale_full)
+        item_galerie = QStandardItem(nume_fisier)
+        
+        # Cautam daca avem cache (iconita) in DB pentru aceasta poza
+        date_db = db_manager.cauta_dupa_cale(cale_full)
+        
+        cale_iconita = cale_full # Default e poza originala
+        if date_db and len(date_db) > 10 and date_db[10]: # Coloana cale_cache
+            if os.path.exists(date_db[10]):
+                cale_iconita = date_db[10]
+
+        item_galerie.setData(QIcon(cale_iconita), Qt.ItemDataRole.DecorationRole)
+        item_galerie.setData(cale_full, Qt.ItemDataRole.UserRole)
+        model_galerie.appendRow(item_galerie)
+        
+    print(f"[Smart Album] Am incarcat {len(cai_fisiere)} imagini pentru {categorie}")
+
 # --- FUNCTII INTERFATA ---
 
 def actualizeaza_panou_dreapta(date, pixmap):
@@ -68,6 +156,7 @@ def actualizeaza_panou_dreapta(date, pixmap):
 
 procesor_activ = None
 scanner_activ = None
+index_folder_curent = None
 
 def cand_selectez_o_imagine(index):
     global procesor_activ
@@ -106,45 +195,75 @@ def actualizeaza_iconita_live(actual):
         if os.path.exists(date[10]):
             model_galerie.setData(index_model, QIcon(date[10]), Qt.ItemDataRole.DecorationRole)
 
+def updateaza_status_progres(curent, total):
+    """Afiseaza progresul scanarii in bara de jos a ferestrei."""
+    if window.statusBar():
+        window.statusBar().showMessage(f"AI Analiza: {curent}/{total}")
+
 def cand_apas_pe_folder(index):
-    global scanner_activ
+    global scanner_activ, index_folder_curent
+    index_folder_curent = index
     cale_folder = tree_model.filePath(index)
+    
     if not os.path.isdir(cale_folder): 
         cale_folder = os.path.dirname(cale_folder)
     
     model_galerie.clear()
     formate = ('.png', '.jpg', '.jpeg', '.bmp')
+    fisiere_de_afisat = []
+
+    # --- LOGICA DE SELECTIE RECURSIVA ---
+    check_recursive = window.findChild(QtWidgets.QCheckBox, "checkRecursive")
     
-    try:
-        nume_fisiere = os.listdir(cale_folder)
-        fisiere_valide = sorted([f for f in nume_fisiere if f.lower().endswith(formate)])
+    if check_recursive and check_recursive.isChecked():
+        # Scanam recursiv toate subfolderele (Flat View)
+        for radacina, directoare, numele_fisiere in os.walk(cale_folder):
+            for nume in numele_fisiere:
+                if nume.lower().endswith(formate):
+                    fisiere_de_afisat.append(os.path.join(radacina, nume))
+    else:
+        # Scanam doar folderul curent
+        try:
+            nume_fisiere = os.listdir(cale_folder)
+            for nume in nume_fisiere:
+                if nume.lower().endswith(formate):
+                    fisiere_de_afisat.append(os.path.join(cale_folder, nume))
+        except Exception as e: 
+            print(f"Eroare listare: {e}")
+
+    fisiere_de_afisat.sort()
+
+    # Construim galeria vizuala (fara nicio simplificare)
+    for cale_full in fisiere_de_afisat:
+        nume_fisier = os.path.basename(cale_full)
+        item = QStandardItem(nume_fisier)
+        date_ex = db_manager.cauta_dupa_cale(cale_full)
         
-        for nume in fisiere_valide:
-            cale_full = os.path.join(cale_folder, nume)
-            item = QStandardItem(nume)
-            date_ex = db_manager.cauta_dupa_cale(cale_full)
-            
-            cale_icon = cale_full
-            if date_ex and len(date_ex) > 10 and date_ex[10] and os.path.exists(date_ex[10]):
-                cale_icon = date_ex[10]
+        cale_icon = cale_full
+        if date_ex and len(date_ex) > 10 and date_ex[10] and os.path.exists(date_ex[10]):
+            cale_icon = date_ex[10]
 
-            item.setData(QIcon(cale_icon), Qt.ItemDataRole.DecorationRole)
-            item.setData(cale_full, Qt.ItemDataRole.UserRole)
-            model_galerie.appendRow(item)
-    except Exception as e: print(e)
+        item.setData(QIcon(cale_icon), Qt.ItemDataRole.DecorationRole)
+        item.setData(cale_full, Qt.ItemDataRole.UserRole)
+        model_galerie.appendRow(item)
 
+    # --- CONFIGURARE SCANNER AI ---
     if scanner_activ and scanner_activ.isRunning():
         scanner_activ.stop()
         scanner_activ.wait()
 
     scanner_activ = ScannerWorker(cale_folder)
+    
+    # Conectam semnalele la functii clasice (fara lambda)
     scanner_activ.imagine_reparata.connect(actualizeaza_iconita_live)
-    scanner_activ.finalizat.connect(incarca_index_faiss) # Refresh FAISS la final
+    scanner_activ.progres.connect(updateaza_status_progres) # <--- Functie clasica
     
-    if window.statusBar():
-        scanner_activ.progres.connect(lambda c, t: window.statusBar().showMessage(f"AI Analiza: {c}/{t}"))
-    
+    # Conexiunile de finalizare
+    scanner_activ.finalizat.connect(incarca_index_faiss) 
+    scanner_activ.finalizat.connect(actualizeaza_smart_albums) # <--- Refresh la cifrele din sidebar
+
     scanner_activ.start()
+
 
 # --- LOGICA DE CAUTARE AI ---
 
@@ -213,6 +332,62 @@ def aplic_filtrare_simpla(text):
     proxy_model.setFilterFixedString(text)
     proxy_model.setFilterCaseSensitivity(Qt.CaseInsensitive)
 
+# --- FUNCTII NOI PENTRU ALBUME SMART ---
+
+def actualizeaza_smart_albums():
+    smart_list = window.findChild(QtWidgets.QListWidget, "smartAlbumWidget")
+    if not smart_list: return
+
+    # Lista trebuie sa aiba aceleasi nume ca cheile din ScannerWorker
+    categorii = ["Oameni", "Natura", "Tehnologie", "Documente", "Arhitectura", "Vehicule", "Animale", "Mancare", "Evenimente", "Diverse"]
+    
+    smart_list.clear() 
+    for cat in categorii:
+        total = db_manager.numara_per_categorie(cat)
+        item_text = f"{cat} ({total})"
+        item = QtWidgets.QListWidgetItem(item_text)
+        smart_list.addItem(item)
+
+def cand_apas_pe_smart_album(item):
+    """Afiseaza in galerie toate pozele din categoria selectata, din orice folder."""
+    text_complet = item.text() 
+    categorie = text_complet.split(" (")[0] # Luam "Documente" din "Documente (1)"
+    
+    # 1. Resetam filtrul de cautare ca sa nu ascunda noile poze
+    proxy_model.setFilterFixedString("")
+    
+    # 2. Curatam galeria curenta
+    model_galerie.clear()
+    
+    # 3. Luam de la baza de date TOATE caile care apartin acestei categorii
+    cai_fisiere = db_manager.obtine_cai_dupa_categorie(categorie)
+    
+    if not cai_fisiere:
+        print(f"Nu am gasit poze pentru categoria: {categorie}")
+        return
+
+    # 4. Adaugam fiecare poza gasita in galerie (exact ca la click pe folder)
+    for cale_full in cai_fisiere:
+        if not os.path.exists(cale_full):
+            continue
+            
+        nume_fisier = os.path.basename(cale_full)
+        item_galerie = QStandardItem(nume_fisier)
+        
+        # Cautam daca avem cache (iconita) in DB pentru aceasta poza
+        date_db = db_manager.cauta_dupa_cale(cale_full)
+        
+        cale_iconita = cale_full # Default e poza originala
+        if date_db and len(date_db) > 10 and date_db[10]: # Coloana cale_cache
+            if os.path.exists(date_db[10]):
+                cale_iconita = date_db[10]
+
+        item_galerie.setData(QIcon(cale_iconita), Qt.ItemDataRole.DecorationRole)
+        item_galerie.setData(cale_full, Qt.ItemDataRole.UserRole)
+        model_galerie.appendRow(item_galerie)
+        
+    print(f"[Smart Album] Am incarcat {len(cai_fisiere)} imagini pentru {categorie}")
+
 # --- LANSAREA ---
 app = QtWidgets.QApplication(sys.argv)
 loader = QUiLoader()
@@ -251,6 +426,19 @@ tree_view.setModel(tree_model)
 tree_view.setRootIndex(tree_model.index(cale_start))
 for i in range(1, 4): tree_view.hideColumn(i)
 tree_view.clicked.connect(cand_apas_pe_folder)
+#-----------------------------------------------------------------------------------
+def refresh_galerie_la_bifa():
+    """Cauta din nou pozele daca am schimbat setarea de recursivitate."""
+    global index_folder_curent
+    # Daca am apasat deja pe un folder inainte, re-apelam functia cu acelasi index
+    if index_folder_curent:
+        cand_apas_pe_folder(index_folder_curent)
+
+# Gasim checkbox-ul si il conectam
+check_recursive = window.findChild(QtWidgets.QCheckBox, "checkRecursive")
+if check_recursive:
+    # stateChanged se declanseaza cand bifezi sau debifezi
+    check_recursive.stateChanged.connect(refresh_galerie_la_bifa)
 
 search_bar = window.findChild(QtWidgets.QLineEdit, "searchBar")
 if search_bar:
@@ -258,6 +446,17 @@ if search_bar:
     search_bar.textChanged.connect(aplic_filtrare_simpla)
     # Cand apesi ENTER, porneste AI-ul (semantic)
     search_bar.returnPressed.connect(execut_cautare_ai)
+#----------------------------------------------------------------------------------
+
+# Gasim lista de albume in UI
+smart_album_view = window.findChild(QtWidgets.QListWidget, "smartAlbumWidget")
+
+if smart_album_view:
+    # Conectam click-ul la functia de filtrare
+    smart_album_view.itemClicked.connect(cand_apas_pe_smart_album)
+
+# Prima numaratoare la deschiderea aplicatiei
+actualizeaza_smart_albums()
 
 window.show()
 sys.exit(app.exec())

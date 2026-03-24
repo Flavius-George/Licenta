@@ -28,8 +28,8 @@ class ManagerBazaDate:
                 data_poza TEXT,
                 gps TEXT,
                 cale_cache TEXT,
-                categorie TEXT,  -- NOU: Aici salvam categoria (Oameni, Natura, etc.)
-                vector_ai BLOB   -- Amprenta AI
+                categorie TEXT,  -- Aici salvam categoria (Oameni, Natura, etc.)
+                vector_ai BLOB   -- Amprenta AI salvata ca binar
             )
         ''')
         conn.commit()
@@ -60,7 +60,7 @@ class ManagerBazaDate:
                 d.get('data'), 
                 d.get('gps'),
                 d.get('cale_cache'),
-                d.get('categorie'), # Salvam categoria decisa de ScannerWorker
+                d.get('categorie'), 
                 vector_binar
             ))
             conn.commit()
@@ -79,7 +79,7 @@ class ManagerBazaDate:
         return date
 
     def obtine_toti_vectorii(self):
-        """Incarca toti vectorii pentru FAISS."""
+        """Incarca toti vectorii pentru motorul de cautare FAISS."""
         conn = self._conectare()
         cursor = conn.cursor()
         cursor.execute("SELECT cale, vector_ai FROM imagini WHERE vector_ai IS NOT NULL")
@@ -95,11 +95,31 @@ class ManagerBazaDate:
                 continue
         return date_ai
 
-    def obtine_imagini_dupa_categorie(self, nume_categorie):
-        """Returneaza lista de fisiere dintr-o anumita categorie AI."""
+    # --- FUNCTII NOI PENTRU SMART ALBUMS ---
+
+    def numara_per_categorie(self, nume_categorie):
+        """Intoarce numarul de poze dintr-o anumita categorie AI."""
         conn = self._conectare()
         cursor = conn.cursor()
-        cursor.execute("SELECT nume FROM imagini WHERE categorie = ?", (nume_categorie,))
-        rezultate = [r[0] for r in cursor.fetchall()]
+        cursor.execute("SELECT COUNT(*) FROM imagini WHERE categorie = ?", (nume_categorie,))
+        rezultat = cursor.fetchone()
         conn.close()
-        return rezultate
+        
+        if rezultat:
+            return rezultat[0]
+        return 0
+
+    def obtine_cai_dupa_categorie(self, nume_categorie):
+        """Returneaza lista de cai complete (paths) pentru o anumita categorie AI."""
+        conn = self._conectare()
+        cursor = conn.cursor()
+        cursor.execute("SELECT cale FROM imagini WHERE categorie = ?", (nume_categorie,))
+        rezultate = cursor.fetchall()
+        conn.close()
+        
+        # Transformam lista de tuple in lista simpla de cai
+        cai_finale = []
+        for r in rezultate:
+            cai_finale.append(r[0])
+            
+        return cai_finale
