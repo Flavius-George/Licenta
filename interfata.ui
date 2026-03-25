@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>1022</width>
-    <height>732</height>
+    <height>792</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -54,8 +54,14 @@
      <widget class="QFrame" name="menuFrame">
       <property name="minimumSize">
        <size>
-        <width>300</width>
+        <width>350</width>
         <height>0</height>
+       </size>
+      </property>
+      <property name="maximumSize">
+       <size>
+        <width>500</width>
+        <height>16777215</height>
        </size>
       </property>
       <property name="frameShape">
@@ -66,11 +72,64 @@
       </property>
       <layout class="QVBoxLayout" name="verticalLayout_3">
        <item>
+        <widget class="QFrame" name="frame_2">
+         <property name="frameShape">
+          <enum>QFrame::Shape::StyledPanel</enum>
+         </property>
+         <property name="frameShadow">
+          <enum>QFrame::Shadow::Raised</enum>
+         </property>
+         <layout class="QHBoxLayout" name="horizontalLayout_2">
+          <item>
+           <widget class="QPushButton" name="btnImportFolder">
+            <property name="maximumSize">
+             <size>
+              <width>100</width>
+              <height>40</height>
+             </size>
+            </property>
+            <property name="text">
+             <string>Import</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="btnRemoveFolder">
+            <property name="maximumSize">
+             <size>
+              <width>100</width>
+              <height>40</height>
+             </size>
+            </property>
+            <property name="text">
+             <string>X</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="pushButton_3">
+            <property name="maximumSize">
+             <size>
+              <width>100</width>
+              <height>40</height>
+             </size>
+            </property>
+            <property name="text">
+             <string>Create</string>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+       <item>
+        <widget class="QListWidget" name="sourceListWidget"/>
+       </item>
+       <item>
         <widget class="QSplitter" name="splitter">
          <property name="orientation">
           <enum>Qt::Orientation::Vertical</enum>
          </property>
-         <widget class="QTreeView" name="treeViewFolders"/>
          <widget class="QListWidget" name="smartAlbumWidget"/>
          <widget class="QPushButton" name="bttnAddSmartAlbum">
           <property name="text">
