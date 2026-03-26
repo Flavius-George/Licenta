@@ -1,11 +1,16 @@
 import sys
 import os
+import pickle
 import numpy as np
 import faiss
 from PySide6 import QtWidgets, QtGui, QtCore
 from PySide6.QtGui import QStandardItemModel, QStandardItem, QIcon
 from PySide6.QtCore import Qt, QSize, QDir, QStandardPaths, QSortFilterProxyModel
 from PySide6.QtUiTools import QUiLoader
+from PySide6.QtGui import QShortcut, QKeySequence
+
+import shutil
+from PySide6.QtWidgets import QProgressDialog, QMessageBox, QFileDialog
 
 from database import ManagerBazaDate
 from scanner_worker import ScannerWorker
@@ -163,6 +168,103 @@ def porneste_scanare_folder(cale, recursiv=False):
     scanner_activ.finalizat.connect(afiseaza_toata_libraria)
     scanner_activ.start()
 
+def executa_organizarea_fizica():
+    # 1. Intrebam utilizatorul UNDE vrea sa creeze noua structura
+    director_destinatie = QFileDialog.getExistingDirectory(window, "Alege folderul unde se va crea galeria organizata")
+    
+    if not director_destinatie:
+        return # Utilizatorul a apasat Cancel
+
+    # 2. Luam datele din baza de date
+    date_poze = db_manager.obtine_toate_pentru_organizare()
+    if not date_poze:
+        QMessageBox.warning(window, "Atentie", "Nu exista poze scanate in baza de date!")
+        return
+
+    # 3. Pregatim bara de progres
+    progress = QProgressDialog("Se organizeaza pozele...", "Anuleaza", 0, len(date_poze), window)
+    progress.setWindowModality(QtCore.Qt.WindowModal)
+    progress.setWindowTitle("Organizare AI")
+    progress.show()
+
+    contor = 0
+    for cale_orig, categorie in date_poze:
+        if progress.wasCanceled():
+            break
+            
+        # Daca AI-ul nu a fost sigur, punem poza in "Diverse"
+        cat_folder = categorie if categorie else "Diverse"
+        
+        # Cream folderul categoriei (ex: D:/Export/Natura)
+        cale_folder_nou = os.path.join(director_destinatie, cat_folder).replace('\\', '/')
+        if not os.path.exists(cale_folder_nou):
+            os.makedirs(cale_folder_nou)
+
+        # Pregatim calea finala a fisierului
+        nume_fisier = os.path.basename(cale_orig)
+        cale_finala_fisier = os.path.join(cale_folder_nou, nume_fisier).replace('\\', '/')
+
+        # Copiem fizic fisierul (copy2 pastreaza data si metadatele)
+        try:
+            if os.path.exists(cale_orig):
+                shutil.copy2(cale_orig, cale_finala_fisier)
+        except Exception as e:
+            print(f"Eroare la copierea fisierului {nume_fisier}: {e}")
+
+        contor += 1
+        progress.setValue(contor)
+
+    progress.setValue(len(date_poze))
+    QMessageBox.information(window, "Succes", f"Organizarea a fost finalizata! {contor} poze au fost copiate.")
+
+def deschide_poza_nativ(index):
+        """Deschide imaginea in programul implicit de vizualizare din Windows."""
+        # Mapam indexul de la Proxy (filtru) la Modelul de baza
+        index_sursa = proxy_model.mapToSource(index)
+        cale_fisier = index_sursa.data(Qt.ItemDataRole.UserRole)
+        
+        if cale_fisier and os.path.exists(cale_fisier):
+            # QDesktopServices stie sa vorbeasca direct cu Windows-ul
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(cale_fisier))
+
+
+def sterge_imaginea_selectata():
+    """Sterge imaginea selectata curent din DB si din Galerie."""
+    
+    print("Scurtatura Delete a fost activata!") # <--- Linie de test
+    index = view_galerie.currentIndex()
+    if not index.isValid(): 
+        print("Nicio imagine selectata!")
+        return
+    
+
+    index = view_galerie.currentIndex()
+    if not index.isValid(): return
+
+    index_sursa = proxy_model.mapToSource(index)
+    cale_fisier = index_sursa.data(Qt.ItemDataRole.UserRole)
+    nume = os.path.basename(cale_fisier)
+
+    # Confirmare rapida
+    raspuns = QMessageBox.question(window, "Confirmare Stergere", 
+                                  f"Sigur vrei sa scoti poza '{nume}' din galerie?\n(Fisierul ramane pe disc)")
+    
+    if raspuns == QMessageBox.Yes:
+        # 1. Stergem din DB
+        db_manager.sterge_imagine_dupa_cale(cale_fisier)
+        # 2. Stergem din Model (dispare vizual)
+        model_galerie.removeRow(index_sursa.row())
+        window.statusBar().showMessage(f"Poza {nume} a fost eliminata.", 3000)
+
+# --- SUPRASCRIERE EVENIMENT TASTE ---
+def keyPressEvent(event):
+    if event.key() == Qt.Key_Delete:
+        sterge_imaginea_selectata()
+    # Poti adauga si alte taste aici, ex: tastele sageti pentru navigare
+    # Ii spunem ferestrei sa foloseasca functia noastra de ascultare
+    window.keyPressEvent = keyPressEvent
+
+
 # --- FUNCTII AFISARE GALERIE ---
 
 def populeaza_galeria_cu_cai(cai_fisiere):
@@ -293,6 +395,71 @@ def creeaza_album_inteligent():
             smart_list.addItem(item); smart_list.setCurrentItem(item)
             cand_apas_pe_smart_album(item)
 
+def arata_meniu_poza(pozitie):
+    index = view_galerie.indexAt(pozitie)
+    if not index.isValid(): return
+    
+    meniu = QtWidgets.QMenu()
+    actiune_similare = meniu.addAction("Gaseste poze similare (AI)")
+    
+    actiune = meniu.exec(view_galerie.mapToGlobal(pozitie))
+    
+    if actiune == actiune_similare:
+        executa_cautare_similara(index)
+
+def executa_cautare_similara(index):
+    index_sursa = proxy_model.mapToSource(index)
+    cale_poza = index_sursa.data(Qt.ItemDataRole.UserRole)
+    
+    # 1. Luam vectorul pozei din DB
+    date_poza = db_manager.cauta_dupa_cale(cale_poza)
+    if not date_poza or date_poza[12] is None: 
+        print("Nu am vector AI pentru aceasta poza!"); return
+    
+   # In loc de np.frombuffer, folosim pickle.loads pentru ca asa e salvat in DB
+    try:
+        vector_raw = pickle.loads(date_poza[12])
+        # Ne asiguram ca e un array numpy de tip float32 si are forma (1, 512)
+        vector_query = np.array(vector_raw).astype('float32').reshape(1, -1)
+    except Exception as e:
+        print(f"Eroare la decodarea vectorului: {e}")
+        return
+    # -----------------------
+    
+    # 2. Cautam in FAISS cele mai apropiate 10 rezultate
+    k = min(10, index_faiss.ntotal)
+    if k == 0: return
+    print(f"DEBUG: Dimensiune index FAISS: {index_faiss.d}")
+    print(f"DEBUG: Dimensiune vector query: {vector_query.shape}")
+    distante, indexuri = index_faiss.search(vector_query, k)
+    
+    # 3. Filtram galeria sa arate doar acele poze
+    nume_gasite = []
+    for i, idx in enumerate(indexuri[0]):
+        if idx != -1: # FAISS returneaza -1 daca nu gaseste destule
+            nume_gasite.append(QtCore.QRegularExpression.escape(os.path.basename(mapare_cai[idx])))
+    
+    if nume_gasite:
+        pattern = "^(" + "|".join(nume_gasite) + ")$"
+        proxy_model.setFilterRegularExpression(QtCore.QRegularExpression(pattern, QtCore.QRegularExpression.CaseInsensitiveOption))
+        window.statusBar().showMessage(f"Am gasit {len(nume_gasite)} poze similare.")
+
+def arata_meniu_folder(pozitie):
+    item = lista_surse.itemAt(pozitie)
+    if not item: return
+    
+    meniu = QtWidgets.QMenu()
+    actiune_scan = meniu.addAction("Rescanare (Cauta poze noi)")
+    
+    # Executam meniul si vedem ce a ales userul
+    actiune = meniu.exec(lista_surse.mapToGlobal(pozitie))
+    check_box = window.findChild(QtWidgets.QCheckBox, "checkRecursive") 
+    if actiune == actiune_scan:
+        cale_folder = item.text()
+        recursiv = check_box.isChecked() if check_box else False
+        print(f"[Sistem] Rescanare folder: {cale_folder}")
+        porneste_scanare_folder(cale_folder, recursiv)
+
 # --- LANSAREA ---
 app = QtWidgets.QApplication(sys.argv)
 loader = QUiLoader()
@@ -320,6 +487,13 @@ if lista_surse:
     lista_surse.itemClicked.connect(cand_apas_pe_sursa)
     incarca_sursele_vizual()
 
+# Permitem meniuri personalizate
+lista_surse.setContextMenuPolicy(Qt.CustomContextMenu)
+lista_surse.customContextMenuRequested.connect(arata_meniu_folder)
+
+view_galerie.setContextMenuPolicy(Qt.CustomContextMenu)
+view_galerie.customContextMenuRequested.connect(arata_meniu_poza)
+
 btn_import = window.findChild(QtWidgets.QPushButton, "btnImportFolder")
 if btn_import:
     btn_import.clicked.connect(adauga_sursa_noua)
@@ -340,6 +514,20 @@ if smart_album_view:
 btn_colectie_noua = window.findChild(QtWidgets.QPushButton, "bttnAddSmartAlbum")
 if btn_colectie_noua:
     btn_colectie_noua.clicked.connect(creeaza_album_inteligent)
+
+btn_organize = window.findChild(QtWidgets.QPushButton, "organizeBttn")
+if btn_organize:
+    btn_organize.clicked.connect(executa_organizarea_fizica)
+
+view_galerie.doubleClicked.connect(deschide_poza_nativ)
+
+#Cream scurtatura pentru tasta Delete
+shortcut_delete = QShortcut(QKeySequence(Qt.Key_Delete), window)
+
+#O conectam la functia de stergere
+shortcut_delete.activated.connect(sterge_imaginea_selectata)
+
+
 
 actualizeaza_smart_albums()
 

@@ -155,4 +155,23 @@ class ManagerBazaDate:
         finally:
             conn.close()
     
+    def obtine_toate_pentru_organizare(self):
+        """Returneaza o lista de tuple (cale_originala, categorie) pentru export."""
+        conn = self._conectare()
+        cursor = conn.cursor()
+        # Luam calea si categoria pentru toate imaginile scanate
+        cursor.execute("SELECT cale, categorie FROM imagini")
+        rezultate = cursor.fetchall()
+        conn.close()
+        return rezultate
+    
+    def sterge_imagine_dupa_cale(self, cale):
+        """Sterge o singura imagine din baza de date folosind calea ei."""
+        conn = self._conectare()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM imagini WHERE cale = ?", (cale,))
+            conn.commit()
+        finally:
+            conn.close()
     
