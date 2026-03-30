@@ -123,19 +123,25 @@
         </widget>
        </item>
        <item>
-        <widget class="QListWidget" name="sourceListWidget"/>
-       </item>
-       <item>
         <widget class="QSplitter" name="splitter">
          <property name="orientation">
           <enum>Qt::Orientation::Vertical</enum>
          </property>
-         <widget class="QListWidget" name="smartAlbumWidget"/>
-         <widget class="QPushButton" name="bttnAddSmartAlbum">
-          <property name="text">
-           <string>Colectie noua</string>
-          </property>
+         <widget class="QListWidget" name="sourceListWidget"/>
+         <widget class="QTreeWidget" name="smartTreeWidget">
+          <column>
+           <property name="text">
+            <string notr="true">1</string>
+           </property>
+          </column>
          </widget>
+        </widget>
+       </item>
+       <item>
+        <widget class="QPushButton" name="bttnAddSmartAlbum">
+         <property name="text">
+          <string>Creeaza un album nou</string>
+         </property>
         </widget>
        </item>
       </layout>
