@@ -6,7 +6,7 @@ import faiss
 import shutil
 from PySide6 import QtWidgets, QtGui, QtCore
 from PySide6.QtGui import QStandardItemModel, QStandardItem, QIcon, QShortcut, QKeySequence
-from PySide6.QtCore import Qt, QSize, QStandardPaths
+from PySide6.QtCore import Qt, QSize, QStandardPaths, QThread
 from PySide6.QtUiTools import QUiLoader
 from PySide6.QtWidgets import QProgressDialog, QMessageBox, QFileDialog
 from PySide6.QtCore import QSortFilterProxyModel
@@ -41,10 +41,17 @@ STRUCTURA_ALBUME = {
 }
 
 # Praguri CLIP (justificate experimental in teza)
-PRAG_CAUTARE_SEMANTICA = 0.21   # pentru cautare text -> imagine
+PRAG_CAUTARE_SEMANTICA   = 0.21   # pentru cautare text -> imagine
 PRAG_SIMILITUDINE_VIZUALA = 0.20  # pentru "gaseste similare"
 
-# Coloane tabel SQLite (evitam indici magici)
+# Daca True, scanarea foloseste TTA (Test-Time Augmentation) cu 5 crop-uri
+# pentru o clasificare mai robusta (recomandat pentru demo-ul de licenta).
+# Pune pe False daca vrei scanari de ~5x mai rapide cand testezi pe colectii mari.
+SCANARE_CU_TTA = True
+
+# ----------------------------------------------------------
+# Coloane tabel SQLite — schema cu geocodare
+# ----------------------------------------------------------
 COL_CALE       = 1
 COL_NUME       = 2
 COL_FORMAT     = 3
@@ -54,9 +61,14 @@ COL_MARCA      = 6
 COL_MODEL      = 7
 COL_DATA_POZA  = 8
 COL_GPS        = 9
-COL_CALE_CACHE = 10
-COL_CATEGORIE  = 11
-COL_VECTOR_AI  = 12
+COL_LAT        = 10
+COL_LON        = 11
+COL_ORAS       = 12
+COL_TARA       = 13
+COL_TARA_COD   = 14
+COL_CALE_CACHE = 15
+COL_CATEGORIE  = 16
+COL_VECTOR_AI  = 17
 
 
 # ============================================================
@@ -80,7 +92,7 @@ class MainWindow:
         # --- Baza de date ---
         self.db = ManagerBazaDate(self.cale_db)
 
-        # --- Model AI (CLIP) ---
+        # --- Model AI (CLIP) - ENCARCAT O SINGURA DATA SI PARTAJAT CU SCANNER ---
         print("[AI] Se incarca modelul CLIP (clip-ViT-B-32)...")
         self.model_ai = SentenceTransformer('clip-ViT-B-32')
 
@@ -212,24 +224,23 @@ class MainWindow:
             f"a high quality photo of {text}",
             f"a picture containing {text}"
         ]
-        # Generam vectori pentru toate variantele si calculam media lor
-        v_lista = self.model_ai.encode(templates, normalize_embeddings=True) # 
+        v_lista = self.model_ai.encode(templates, normalize_embeddings=True)
         v_mediu = np.mean(v_lista, axis=0)
-        faiss.normalize_L2(v_mediu.reshape(1, -1)) # 
+        faiss.normalize_L2(v_mediu.reshape(1, -1))
         return v_mediu.astype("float32")
 
     def cauta_semantic(self, text: str, k: int = 40, prag: float = 0.21) -> list[str]:
-        """Cautare cu prag  (0.21) pentru a elimina rezultatele zgomotoase."""
-        if self.index_faiss.ntotal == 0: return []
-        
+        """Cautare cu prag (0.21) pentru a elimina rezultatele zgomotoase."""
+        if self.index_faiss.ntotal == 0:
+            return []
+
         v_query = self._encode_text_query(text)
         k_efectiv = min(k, self.index_faiss.ntotal)
-        distante, indexuri = self.index_faiss.search(v_query.reshape(1, -1), k_efectiv) # 
+        distante, indexuri = self.index_faiss.search(v_query.reshape(1, -1), k_efectiv)
 
         cai_gasite = []
         for scor, idx in zip(distante[0], indexuri[0]):
-            # Pragul de 0.21 este esential pentru a evita confuziile vizuale
-            if idx != -1 and scor > prag: 
+            if idx != -1 and scor > prag:
                 cai_gasite.append(self.mapare_cai[idx])
         return cai_gasite
 
@@ -243,11 +254,25 @@ class MainWindow:
             self.scanner_activ.stop()
             self.scanner_activ.wait()
 
-        self.scanner_activ = ScannerWorker(cale, self.folder_cache, self.cale_db, recursiv)
+        # ---- PARTAJAM MODELUL CLIP cu scanner-ul ----
+        # Astfel evitam o a doua copie de ~600MB in RAM si timpul de
+        # reincarcare (~5-15 secunde).
+        self.scanner_activ = ScannerWorker(
+            cale,
+            self.folder_cache,
+            self.cale_db,
+            recursiv,
+            model=self.model_ai,
+            cu_tta=SCANARE_CU_TTA,
+        )
         self.scanner_activ.imagine_reparata.connect(self._actualizeaza_iconita_live)
         self.scanner_activ.progres.connect(self._updateaza_status_progres)
         self.scanner_activ.finalizat.connect(self._dupa_scanare_finalizata)
-        self.scanner_activ.start()
+
+        # ---- PRIORITATE SCAZUTA pentru thread-ul de scanare ----
+        # OS-ul va da intaietate UI-ului si altor aplicatii. Calculatorul
+        # ramane responsiv chiar si in timpul scanarii unei colectii mari.
+        self.scanner_activ.start(QThread.Priority.LowPriority)
 
     def _dupa_scanare_finalizata(self):
         self.incarca_index_faiss()
@@ -311,6 +336,11 @@ class MainWindow:
         tree.setHeaderLabel("Organizare Inteligenta")
         tree.setIndentation(20)
 
+        # ---- OPTIMIZARE: un singur query pentru toate numaratorile ----
+        # Inainte: 16 query-uri SQL (cate unul per subcategorie)
+        # Acum:    1 query SQL cu GROUP BY
+        numaratori = self.db.numara_per_categorii_toate()
+
         # A. Categorii predefinite (clasificate de CLIP la scanare)
         for domeniu, categorii in STRUCTURA_ALBUME.items():
             domeniu_item = QtWidgets.QTreeWidgetItem([domeniu])
@@ -324,7 +354,7 @@ class MainWindow:
                 domeniu_item.addChild(cat_item)
 
                 for sub in subcategorii:
-                    nr = self.db.numara_per_categorie(sub)
+                    nr = numaratori.get(sub, 0)
                     sub_item = QtWidgets.QTreeWidgetItem([f"{sub} ({nr})"])
                     sub_item.setData(0, Qt.UserRole, sub)
                     cat_item.addChild(sub_item)
@@ -333,7 +363,7 @@ class MainWindow:
         albume_custom = self.db.obtine_albume_custom()
         if albume_custom:
             separator = QtWidgets.QTreeWidgetItem(["── Smart Albums ──"])
-            separator.setFlags(Qt.NoItemFlags)  # nu e clickabil
+            separator.setFlags(Qt.NoItemFlags)
             tree.addTopLevelItem(separator)
 
             for nume in albume_custom:
@@ -354,11 +384,9 @@ class MainWindow:
         self._reseteaza_filtru()
 
         if data.startswith("SEARCH:"):
-            # Album custom → cautare semantica CLIP
             termen = data.replace("SEARCH:", "")
             self._afiseaza_rezultate_cautare(termen)
         else:
-            # Categorie predefinita → filtru direct din DB
             cai = self.db.obtine_cai_dupa_categorie(data)
             self.populeaza_galeria_cu_cai(cai)
 
@@ -378,8 +406,6 @@ class MainWindow:
         nume = nume.strip()
         self.db.salveaza_album_custom(nume)
         self.actualizeaza_smart_albums()
-
-        # Navigam automat la albumul nou creat
         self._afiseaza_rezultate_cautare(nume)
         print(f"[UI] Album Smart creat si salvat: '{nume}'")
 
@@ -396,56 +422,70 @@ class MainWindow:
         """Incarca lista de imagini in QListView folosind thumbnail-urile din cache."""
         self.model_galerie.clear()
 
-        # Deduplicare + normalizare
         cai_unice = list(dict.fromkeys(
             os.path.normpath(c).replace("\\", "/") for c in cai
         ))
+
+        # ---- OPTIMIZARE: un singur query in loc de N ----
+        # Inainte: cate un query SQL per imagine (cauta_dupa_cale) → cu 5000
+        #          de imagini, 5000 de query-uri si UI inghetat 2-5 secunde.
+        # Acum:    un singur dict cu toate {cale: cale_cache}.
+        mapa_cache = self.db.obtine_cai_si_cache()
 
         for cale in cai_unice:
             if not os.path.exists(cale):
                 continue
             item = QStandardItem(os.path.basename(cale))
-            d = self.db.cauta_dupa_cale(cale)
-            icon_path = (
-                d[COL_CALE_CACHE]
-                if (d and d[COL_CALE_CACHE] and os.path.exists(d[COL_CALE_CACHE]))
-                else cale
-            )
+            cache = mapa_cache.get(cale)
+            icon_path = cache if (cache and os.path.exists(cache)) else cale
             item.setData(QIcon(icon_path), Qt.ItemDataRole.DecorationRole)
             item.setData(cale, Qt.ItemDataRole.UserRole)
             self.model_galerie.appendRow(item)
 
     def cand_selectez_o_imagine(self, index: QtCore.QModelIndex):
         """Citeste datele din DB si actualizeaza panoul de detalii din dreapta."""
+        # 1. Obtinem calea reala a fisierului trecand de filtrul proxy
         index_sursa = self.proxy_model.mapToSource(index)
         cale = index_sursa.data(Qt.ItemDataRole.UserRole)
+
         if not cale:
             return
 
+        # 2. Cautam informatiile in baza de date
         date_db = self.db.cauta_dupa_cale(cale)
         preview_label = self.window.findChild(QtWidgets.QLabel, "previewLabel")
 
         if date_db:
+            # 3. Pregatim dictionarul de info (folosind accesul prin nume/cheie)
             info = {
-                "nume":      date_db[COL_NUME],
-                "rezolutie": date_db[COL_REZOLUTIE],
-                "mb":        date_db[COL_MB],
-                "marca":     date_db[COL_MARCA],
-                "model":     date_db[COL_MODEL],
-                "data":      date_db[COL_DATA_POZA],
-                "gps":       date_db[COL_GPS],
+                "nume":      date_db['nume'],
+                "rezolutie": date_db['rezolutie'],
+                "mb":        date_db['mb'],
+                "marca":     date_db['marca'],
+                "model":     date_db['model'],
+                "data":      date_db['data_poza'],
+                "gps":       date_db['gps'],
+                "oras":      date_db['oras'],
+                "tara":      date_db['tara'],
             }
-            cale_cache = date_db[COL_CALE_CACHE]
+
+            # 4. Gestionam vizualizarea (Thumbnail din cache sau imagine originala)
+            cale_cache = date_db['cale_cache']
             pixmap = (
                 QtGui.QPixmap(cale_cache)
                 if (cale_cache and os.path.exists(cale_cache))
                 else QtGui.QPixmap(cale)
             )
+
+            # 5. Actualizam interfata
             self._actualizeaza_panou_dreapta(info, pixmap)
+
         else:
-            # Fallback: procesam live cu worker
+            # 6. Fallback: Daca imaginea nu este inca in DB, o procesam live
             if self.procesor_activ and self.procesor_activ.isRunning():
                 self.procesor_activ.terminate()
+                self.procesor_activ.wait()
+
             self.procesor_activ = ProcesorImagine(cale, preview_label.size())
             self.procesor_activ.gata_procesarea.connect(self._actualizeaza_panou_dreapta)
             self.procesor_activ.start()
@@ -538,31 +578,36 @@ class MainWindow:
     def _reseteaza_filtru(self):
         """Curata absolut orice filtru activ pentru a lasa galeria libera."""
         self.proxy_model.setFilterFixedString("")
-        self.proxy_model.setFilterRegularExpression("") # Curata cautarea AI
+        self.proxy_model.setFilterRegularExpression("")
         if hasattr(self, 'search_bar'):
-            self.search_bar.clear() # Curata vizual si bara de search
+            self.search_bar.clear()
 
     # ----------------------------------------------------------
     # ORGANIZARE FIZICA PE DISC
     # ----------------------------------------------------------
 
     def executa_organizarea_fizica(self):
-        """Organizare Optimizata: Domeniu -> Categorie -> Subcategorie -> An-Luna -> Locatie."""
+        """Organizare: Domeniu -> Categorie -> Subcategorie -> An-Luna -> Tara -> Oras."""
         destinatie = QFileDialog.getExistingDirectory(self.window, "Selecteaza destinatia de export")
-        if not destinatie: return
+        if not destinatie:
+            return
 
-        # Luam datele din DB conform structurii tale 
         date_poze = self.db.obtine_toate_pentru_organizare()
-        if not date_poze: return
+        if not date_poze:
+            return
 
         progress = QProgressDialog("Se organizeaza colectia...", "Anuleaza", 0, len(date_poze), self.window)
         progress.show()
 
         succes = 0
-        for i, (cale_orig, subcat_ai, data_raw, gps_raw) in enumerate(date_poze):
-            if progress.wasCanceled(): break
+        for i, rand in enumerate(date_poze):
+            if progress.wasCanceled():
+                break
 
-            # 1. Identificam Ierarhia din STRUCTURA_ALBUME 
+            # Despachetam cele 8 coloane returnate de DB
+            cale_orig, subcat_ai, data_raw, gps_raw, lat, lon, oras, tara = rand
+
+            # 1. Identificam ierarhia din STRUCTURA_ALBUME
             domeniu, categorie_mare = "Alte_Categorii", "Diverse"
             subcat_finala = subcat_ai if subcat_ai else "Nesortate"
 
@@ -574,31 +619,39 @@ class MainWindow:
                         categorie_mare = cat_m
                         gasit = True
                         break
-                if gasit: break
+                if gasit:
+                    break
 
-            # 2. Prelucram Data la nivel de LUNA (An-Luna) 
-            # In loc de 2026-03-28, facem doar 2026-03
+            # 2. Data → An-Luna (ex: "2024-06")
             if data_raw and len(data_raw) >= 7:
-                an, luna = data_raw[:4], data_raw[5:7]
+                an   = data_raw[:4]
+                luna = data_raw[5:7]
                 data_folder = f"{an}-{luna}"
             else:
                 data_folder = "Data_Necunoscuta"
 
-            # 3. Prelucram Locatia (Fara caractere interzise) 
-            locatie_folder = self._curata_gps_pentru_folder(gps_raw)
+            # 3. Locatie din geocodare: Tara/Oras
+            if tara and oras and tara not in ("Necunoscut", ""):
+                locatie_folder = os.path.join(
+                    self._curata_pentru_folder(tara),
+                    self._curata_pentru_folder(oras)
+                )
+            else:
+                locatie_folder = "Fara_Locatie"
 
-            # 4. Construim Calea Finala
-            # Categoria -> Subcategorie -> Data (Luna) -> Locatia
-            cale_relativa = os.path.join(domeniu, categorie_mare, subcat_finala, data_folder, locatie_folder)
-            folder_final = os.path.join(destinatie, cale_relativa).replace('\\', '/')
-            
+            # 4. Construim calea finala
+            cale_relativa = os.path.join(
+                domeniu, categorie_mare, subcat_finala, data_folder, locatie_folder
+            )
+            folder_final = os.path.join(destinatie, cale_relativa).replace("\\", "/")
+
             try:
                 os.makedirs(folder_final, exist_ok=True)
                 if os.path.exists(cale_orig):
                     shutil.copy2(cale_orig, os.path.join(folder_final, os.path.basename(cale_orig)))
                     succes += 1
             except Exception as e:
-                print(f"[EROARE] {e}")
+                print(f"[EROARE organizare] {e}")
 
             progress.setValue(i + 1)
 
@@ -606,22 +659,22 @@ class MainWindow:
         QMessageBox.information(self.window, "Succes", f"Organizare gata! {succes} poze copiate.")
 
     @staticmethod
-    def _parse_data(data_raw: str | None) -> tuple[str, str]:
-        """Extrage (an, luna) din string-ul EXIF 'YYYY:MM:DD HH:MM:SS'."""
-        if data_raw and len(data_raw) >= 7:
-            return data_raw[:4], data_raw[5:7]
-        return "An_Necunoscut", "Luna_Necunoscut"
-
-    @staticmethod
-    def _curata_gps_pentru_folder(gps_raw: str | None) -> str:
-        """Transforma coordonatele GPS intr-un nume de folder valid pe Windows."""
-        if not gps_raw or gps_raw in ("", "Fara GPS"):
-            return "Fara_Locatie"
+    def _curata_pentru_folder(text: str | None) -> str:
+        """Elimina caracterele interzise pe Windows dintr-un string destinat numelui de folder."""
+        if not text:
+            return "Necunoscut"
         caractere_interzise = [":", "|", "/", "\\", "<", ">", "*", "?", '"', "."]
-        rezultat = gps_raw
+        rezultat = text
         for c in caractere_interzise:
             rezultat = rezultat.replace(c, "-")
         return rezultat.strip()
+
+    @staticmethod
+    def _curata_gps_pentru_folder(gps_raw: str | None) -> str:
+        """Pastrat pentru compatibilitate. Foloseste _curata_pentru_folder in locul sau."""
+        if not gps_raw or gps_raw in ("", "Fara GPS"):
+            return "Fara_Locatie"
+        return MainWindow._curata_pentru_folder(gps_raw)
 
     # ----------------------------------------------------------
     # HELPERS UI
@@ -644,18 +697,24 @@ class MainWindow:
             f"<b>Marime:</b> {date.get('mb', '0')} MB",
             f"<b>Rezolutie:</b> {date.get('rezolutie', '---')}",
         ]
+
         marca = date.get("marca")
         model = date.get("model")
         if marca and marca != "Necunoscut":
             linii.append(f"<b>Echipament:</b> {marca} {model or ''}")
 
         data_p = date.get("data")
-        if data_p and data_p != "Data Necunoscuta":
+        if data_p and data_p not in ("Data Necunoscuta", "---", None):
             linii.append(f"<b>Data:</b> {data_p}")
 
+        # Locatie: afisam Oras, Tara daca exista, altfel GPS brut
+        oras = date.get("oras")
+        tara = date.get("tara")
         gps_p = date.get("gps")
-        if gps_p and gps_p != "Fara GPS":
-            linii.append(f"<b>Locatie (GPS):</b> {gps_p}")
+        if oras and tara and tara not in ("Necunoscut", ""):
+            linii.append(f"<b>Locatie:</b> {oras}, {tara}")
+        elif gps_p and gps_p not in ("Fara GPS", ""):
+            linii.append(f"<b>GPS:</b> {gps_p}")
 
         info_label.setText("<br>".join(linii))
         info_label.setWordWrap(True)
